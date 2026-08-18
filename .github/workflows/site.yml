@@ -134,6 +134,12 @@ jobs:
               out.push("error: " + (e && e.message));
             }
             parent.postMessage({ i: @I@, out: out }, "*");
+            setTimeout(function () {
+              var drew = [].some.call(document.body.children, function (e) {
+                return e.tagName !== "SCRIPT";
+              });
+              if (drew) parent.postMessage({ i: @I@, draw: true }, "*");
+            }, 150);
           })();
           '''
 
@@ -158,25 +164,32 @@ jobs:
               )
               if f.endswith(".ts") and app:
                   srcdoc = html.escape(
-                      "<!doctype html><meta charset='utf-8'><script>"
+                      "<!doctype html><meta charset='utf-8'>"
+                      "<style>html,body{margin:0;background:transparent}</style><script>"
                       + harness_js(f[:-3], i) + "</script>",
                       quote=True,
                   )
                   card += (
-                      '<iframe sandbox="allow-scripts" srcdoc="%s"></iframe>'
-                      '<pre class="out" data-i="%d">running…</pre>' % (srcdoc, i)
+                      '<iframe sandbox="allow-scripts" data-i="%d" srcdoc="%s"></iframe>'
+                      '<pre class="out" data-i="%d">running…</pre>' % (i, srcdoc, i)
                   )
               cards.append(card + "</section>")
 
           PARENT = '''
           (function () {
             window.addEventListener("message", function (e) {
-              var el = document.querySelector('[data-i="' + e.data.i + '"]');
-              if (el) {
-                el.textContent = e.data.out.length ? e.data.out.join("\\n") : "no runtime output";
+              if (e.data.out) {
+                var el = document.querySelector('pre.out[data-i="' + e.data.i + '"]');
+                if (el) {
+                  el.textContent = e.data.out.length ? e.data.out.join("\\n") : "no runtime output";
+                }
+              }
+              if (e.data.draw) {
+                var fr = document.querySelector('iframe[data-i="' + e.data.i + '"]');
+                if (fr) fr.style.display = "block";
               }
             });
-            document.querySelectorAll("[data-i]").forEach(function (el) {
+            document.querySelectorAll("pre.out").forEach(function (el) {
               setTimeout(function () {
                 if (el.textContent.indexOf("running") === 0) el.textContent = "timed out";
               }, 2500);
@@ -195,7 +208,8 @@ jobs:
               ".meta{color:#8b949e;font-weight:400;font-size:.8rem}"
               ".card pre{overflow-x:auto;margin:.5rem 0 0;color:#7ee787}"
               ".out{color:#79c0ff;white-space:pre-wrap}"
-              "iframe{display:none}"
+              "iframe{display:none;width:100%;height:240px;border:0;"
+              "border-radius:6px;background:#0d1117}"
           )
           page = (
               "<!doctype html><html><head><meta charset='utf-8'>"

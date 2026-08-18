@@ -57,6 +57,11 @@ compiles every `.ts` file and executes it in a sandboxed frame right on the
 page. Use `console.log(...)`, or `export` something — both are shown under
 the code. Type-only lines honestly report `no runtime output`.
 
+**Can my line draw or animate?** Yes. If your code puts anything into the
+DOM — a `<canvas>` animation, for instance — the card grows a live stage
+and it runs right there. `import "./anims/lissajous";` is a complete,
+working example: one line, someone else's animation.
+
 **Can I fix a typo in an existing line?** No. Every line is someone's
 contribution; lines are append-only.
 
