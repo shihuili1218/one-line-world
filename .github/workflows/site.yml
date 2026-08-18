@@ -1,0 +1,216 @@
+name: site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: generate site
+        run: |
+          mkdir -p public
+          python3 - <<'PYEOF'
+          import html
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          from urllib.parse import quote
+
+          repo = os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"]
+          files = subprocess.run(
+              ["git", "ls-files"], capture_output=True, text=True, check=True
+          ).stdout.splitlines()
+
+          def is_contribution(f):
+              if f.startswith(".github") or f.startswith("."):
+                  return False
+              return f != "README.md"
+
+          items = sorted(f for f in files if is_contribution(f))
+          ts = [f for f in items if f.endswith(".ts")]
+
+          # Compile every .ts to AMD. Contributor code executes only in the
+          # visitor's browser (sandboxed iframes), never on the runner.
+          app = ""
+          if ts:
+              # stage copies with a trailing `export {};` so every file is a
+              # module and tsc always emits a define() wrapper; script-only
+              # files would compile to bare statements that dodge the loader
+              for f in ts:
+                  staged = pathlib.Path(".site-build") / f
+                  staged.parent.mkdir(parents=True, exist_ok=True)
+                  staged.write_text(
+                      pathlib.Path(f).read_text(encoding="utf-8") + "\nexport {};\n",
+                      encoding="utf-8",
+                  )
+              r = subprocess.run(
+                  ["npx", "-y", "-p", "typescript@5", "tsc", "--module", "amd",
+                   "--target", "es2022", "--strict", "--lib", "es2022,dom",
+                   "--outFile", "../public/app.js"] + ts,
+                  capture_output=True, text=True, cwd=".site-build",
+              )
+              if r.returncode == 0:
+                  app = pathlib.Path("public/app.js").read_text(encoding="utf-8")
+              else:
+                  print("tsc failed, .ts cards will be text-only:")
+                  print((r.stdout + r.stderr).strip())
+
+          # Runs inside one sandboxed iframe per .ts file: a 15-line AMD
+          # loader executes the file, captures console.log and every export,
+          # and reports back to the parent page. The watchdog in the parent
+          # marks hung code ("timed out") without freezing the gallery.
+          HARNESS = '''
+          var __defs = {};
+          var define = function (id, deps, factory) {
+            if (typeof id !== "string") { factory = deps; deps = id; id = "__anon"; }
+            __defs[id] = { deps: deps || [], factory: factory };
+          };
+          define.amd = {};
+          @CODE@
+          (function () {
+            var out = [];
+            function fmt(x) {
+              if (typeof x === "function") return "\\u0192 " + (x.name || "anonymous");
+              if (typeof x === "string") return x;
+              try {
+                var s = JSON.stringify(x);
+                if (s === undefined) return String(x);
+                return s.length > 500 ? s.slice(0, 500) + "\\u2026" : s;
+              } catch (e) { return String(x); }
+            }
+            ["log", "info", "warn", "error"].forEach(function (k) {
+              console[k] = function () { out.push([].map.call(arguments, fmt).join(" ")); };
+            });
+            var cache = {};
+            function norm(base, id) {
+              var stack = base.split("/");
+              stack.pop();
+              id.replace(/\\.(js|ts)$/, "").split("/").forEach(function (p) {
+                if (p === ".") return;
+                if (p === "..") stack.pop(); else stack.push(p);
+              });
+              return stack.join("/");
+            }
+            function req(id) {
+              if (cache[id]) return cache[id].exports;
+              var d = __defs[id];
+              if (!d) throw new Error("module not found: " + id);
+              var m = { exports: {} };
+              cache[id] = m;
+              var deps = d.deps.map(function (dep) {
+                if (dep === "require") return req;
+                if (dep === "module") return m;
+                if (dep === "exports") return m.exports;
+                return req(norm(id, dep));
+              });
+              if (typeof d.factory === "function") d.factory.apply(undefined, deps);
+              else m.exports = d.factory;
+              return m.exports;
+            }
+            try {
+              req("@ENTRY@");
+              var ex = cache["@ENTRY@"].exports;
+              Object.keys(ex).forEach(function (k) { out.push(k + " = " + fmt(ex[k])); });
+            } catch (e) {
+              out.push("error: " + (e && e.message));
+            }
+            parent.postMessage({ i: @I@, out: out }, "*");
+          })();
+          '''
+
+          def harness_js(entry, i):
+              js = HARNESS.replace('"@ENTRY@"', json.dumps(entry))
+              js = js.replace("@I@", str(i))
+              js = js.replace("@CODE@", app)
+              # a literal </script> inside the code would close the iframe's
+              # script tag early; break it the JS-safe way
+              return re.sub(r"(?i)</script", "<\\\\/script", js)
+
+          cards = []
+          for f in items:
+              i = len(cards)
+              text = pathlib.Path(f).read_text(encoding="utf-8").strip()
+              name = html.escape(f)
+              href = repo + "/blob/main/" + quote(f)
+              card = (
+                  '<section class="card"><h2><a href="%s">%s</a> '
+                  '<span class="meta">%d line(s)</span></h2><pre>%s</pre>'
+                  % (href, name, text.count("\n") + 1, html.escape(text))
+              )
+              if f.endswith(".ts") and app:
+                  srcdoc = html.escape(
+                      "<!doctype html><meta charset='utf-8'><script>"
+                      + harness_js(f[:-3], i) + "</script>",
+                      quote=True,
+                  )
+                  card += (
+                      '<iframe sandbox="allow-scripts" srcdoc="%s"></iframe>'
+                      '<pre class="out" data-i="%d">running…</pre>' % (srcdoc, i)
+                  )
+              cards.append(card + "</section>")
+
+          PARENT = '''
+          (function () {
+            window.addEventListener("message", function (e) {
+              var el = document.querySelector('[data-i="' + e.data.i + '"]');
+              if (el) {
+                el.textContent = e.data.out.length ? e.data.out.join("\\n") : "no runtime output";
+              }
+            });
+            document.querySelectorAll("[data-i]").forEach(function (el) {
+              setTimeout(function () {
+                if (el.textContent.indexOf("running") === 0) el.textContent = "timed out";
+              }, 2500);
+            });
+          })();
+          '''
+
+          style = (
+              "body{background:#0d1117;color:#c9d1d9;font-family:ui-monospace,SFMono-Regular,"
+              "Menlo,Consolas,monospace;max-width:960px;margin:2rem auto;padding:0 1rem}"
+              "h1 a{color:#c9d1d9;text-decoration:none}"
+              ".sub{color:#8b949e;margin-bottom:2rem}"
+              ".card{border:1px solid #30363d;border-radius:8px;padding:1rem 1.25rem;margin:1rem 0}"
+              ".card h2{font-size:1rem;margin:0;font-weight:600}"
+              ".card a{color:#58a6ff;text-decoration:none}"
+              ".meta{color:#8b949e;font-weight:400;font-size:.8rem}"
+              ".card pre{overflow-x:auto;margin:.5rem 0 0;color:#7ee787}"
+              ".out{color:#79c0ff;white-space:pre-wrap}"
+              "iframe{display:none}"
+          )
+          page = (
+              "<!doctype html><html><head><meta charset='utf-8'>"
+              "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+              "<title>one line world</title><style>%s</style></head><body>"
+              "<h1><a href='%s'>one line world</a></h1>"
+              "<p class='sub'>%d file(s), one line per pull request. Add yours.</p>"
+              "%s<script>%s</script></body></html>"
+          ) % (style, repo, len(items), "".join(cards), PARENT)
+
+          pathlib.Path("public/index.html").write_text(page, encoding="utf-8")
+          print("generated with", len(items), "contributions,", len(ts), "compiled")
+          PYEOF
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deployment
+        uses: actions/deploy-pages@v4

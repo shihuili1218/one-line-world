@@ -1,0 +1,21 @@
+name: one-line
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          # the validator must be the base's own: a PR that touches .github
+          # cannot be judged by a validator it modified itself
+          git checkout "origin/${BASE_REF}" -- .github
+          python3 .github/workflows/validate.py "origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.base_ref }}
