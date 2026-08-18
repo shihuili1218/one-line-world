@@ -1,0 +1,1 @@
+let t=0;const c=document.createElement("canvas");c.width=c.height=240;document.body.append(c);const g=c.getContext("2d")!;const s=()=>{t+=.02;g.fillStyle="rgba(13,17,23,.05)";g.fillRect(0,0,240,240);g.beginPath();g.arc(120+90*Math.sin(t*3),120+90*Math.sin(t*4),3,0,7);g.fillStyle="hsl("+t*40%360+",90%,65%)";g.fill();requestAnimationFrame(s)};s();
